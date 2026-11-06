@@ -2,8 +2,14 @@ name: build
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+env:
+  # v1.2.3 tag -> 1.2.3, otherwise the version in CMakeLists.txt
+  SC_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '1.0.0' }}
 
 jobs:
   windows:
@@ -14,10 +20,37 @@ jobs:
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ env.SC_VERSION }}".TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DBuildDir=$PWD\build\Release" installer\windows\SlideCapture.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test installer (silent install + uninstall)
+        shell: pwsh
+        run: |
+          Start-Process dist\SlideCapture-Setup-Windows.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $docs = [Environment]::GetFolderPath('MyDocuments')
+          $dir  = Join-Path $docs 'Resolume Arena\Extra Effects'
+          foreach ($f in 'SCScreenCapture.dll','SCPresentation.dll') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "missing $f in $dir" }
+          }
+          Write-Host "Installed into $dir"
+          $un = Get-ChildItem "$env:LOCALAPPDATA\SlideCapture\unins*.exe" | Select-Object -First 1
+          Start-Process $un.FullName -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path (Join-Path $dir 'SCPresentation.dll')) { throw "uninstall left files behind" }
+          Write-Host "Uninstall OK"
       - uses: actions/upload-artifact@v4
         with:
           name: SlideCapture-Windows
-          path: build/Release/*.dll
+          path: |
+            dist/SlideCapture-Setup-Windows.exe
+            build/Release/*.dll
 
   macos:
     runs-on: macos-latest
@@ -27,16 +60,28 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
-      - name: Sign (ad-hoc) and zip
+      - name: Sign bundles (ad-hoc)
+        run: codesign --force --deep -s - build/SCScreenCapture.bundle build/SCPresentation.bundle
+      - name: Build installer
+        run: installer/macos/build_pkg.sh "${SC_VERSION#v}" build
+      - name: Test installer
+        run: |
+          sudo installer -pkg dist/SlideCapture-Installer-macOS.pkg -target / -verboseR
+          DEST="$HOME/Documents/Resolume Arena/Extra Effects"
+          ls -la "$DEST"
+          test -f "$DEST/SCScreenCapture.bundle/Contents/MacOS/SCScreenCapture"
+          test -f "$DEST/SCPresentation.bundle/Contents/MacOS/SCPresentation"
+          test "$(stat -f%Su "$DEST/SCPresentation.bundle")" = "$USER"
+          lipo -archs "$DEST/SCPresentation.bundle/Contents/MacOS/SCPresentation"
+      - name: Zip bundles
         run: |
           cd build
-          codesign --force --deep -s - SCScreenCapture.bundle SCPresentation.bundle
-          ditto -c -k --keepParent SCScreenCapture.bundle SCScreenCapture.zip
-          ditto -c -k --keepParent SCPresentation.bundle SCPresentation.zip
+          ditto -c -k --keepParent SCScreenCapture.bundle ../dist/SCScreenCapture-bundle.zip
+          ditto -c -k --keepParent SCPresentation.bundle ../dist/SCPresentation-bundle.zip
       - uses: actions/upload-artifact@v4
         with:
           name: SlideCapture-macOS
-          path: build/*.zip
+          path: dist/*
 
   linux-smoke-test:
     # Linux is not a Resolume platform; this only checks the shared code and plugin logic.
@@ -49,3 +94,23 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSC_BUILD_TESTS=ON && cmake --build build --parallel
       - name: Smoke test
         run: ./build/ffgl_host_smoke build/SCScreenCapture.so build/SCPresentation.so
+
+  release:
+    # Push a tag like v1.0.0 to publish the installers as a GitHub Release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos, linux-smoke-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "SlideCapture ${GITHUB_REF_NAME}" \
+            --notes "Windows: run SlideCapture-Setup-Windows.exe. macOS: open SlideCapture-Installer-macOS.pkg (right-click > Open the first time). Restart Resolume afterwards." \
+            artifacts/SlideCapture-Windows/dist/SlideCapture-Setup-Windows.exe \
+            artifacts/SlideCapture-macOS/SlideCapture-Installer-macOS.pkg

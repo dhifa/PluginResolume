@@ -1,0 +1,33 @@
+#!/bin/bash
+# Runs as root after the payload is installed. Copies the plugins into the
+# Extra Effects folder(s) of the user that is logged in at the console.
+SRC="/Library/Application Support/SlideCapture/Plugins"
+USER_NAME="${SC_TARGET_USER:-$(stat -f%Su /dev/console)}"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] || [ "$USER_NAME" = "loginwindow" ]; then
+	echo "SlideCapture: no console user, plugins left in $SRC"
+	exit 0
+fi
+HOME_DIR="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+[ -n "$HOME_DIR" ] || HOME_DIR="/Users/$USER_NAME"
+GROUP="$(id -gn "$USER_NAME" 2>/dev/null || echo staff)"
+
+TARGETS=()
+for PRODUCT in "Resolume Arena" "Resolume Avenue"; do
+	[ -d "$HOME_DIR/Documents/$PRODUCT" ] && TARGETS+=("$HOME_DIR/Documents/$PRODUCT/Extra Effects")
+done
+[ ${#TARGETS[@]} -gt 0 ] || TARGETS=("$HOME_DIR/Documents/Resolume Arena/Extra Effects")
+
+for DEST in "${TARGETS[@]}"; do
+	if [ ! -d "$DEST" ]; then
+		mkdir -p "$DEST"
+		chown "$USER_NAME:$GROUP" "$(dirname "$DEST")" "$DEST"
+	fi
+	for B in SCScreenCapture.bundle SCPresentation.bundle; do
+		rm -rf "$DEST/$B"
+		cp -R "$SRC/$B" "$DEST/$B"
+		xattr -dr com.apple.quarantine "$DEST/$B" 2>/dev/null || true
+		chown -R "$USER_NAME:$GROUP" "$DEST/$B"
+	done
+	echo "SlideCapture: installed into $DEST"
+done
+exit 0
