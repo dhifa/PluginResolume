@@ -26,9 +26,8 @@ Kedua plugin memakai mesin capture yang sama. Plugin dipisah supaya panel parame
 ## Build
 
 ### Cara termudah: GitHub Actions (tanpa install apa pun)
-1. Upload folder ini ke repository GitHub.
-2. Buka tab **Actions**, lalu jalankan workflow **build**. Workflow juga otomatis jalan setiap push.
-3. Unduh artifact **SlideCapture-Windows** (`.dll`) dan **SlideCapture-macOS** (`.zip` berisi `.bundle`).
+Setiap push otomatis membangun plugin dan installer, lalu menguji pemasangannya.
+Buka tab **Actions** → run terbaru → unduh artifact **SlideCapture-Windows** (berisi installer `.exe`) dan **SlideCapture-macOS** (berisi installer `.pkg`).
 
 ### Windows (manual)
 Butuh Visual Studio 2022 (workload *Desktop development with C++*, termasuk Windows SDK 10.0.22621 atau lebih baru) dan CMake 3.21+.
@@ -55,19 +54,43 @@ Hasilnya `build/SCScreenCapture.bundle` dan `build/SCPresentation.bundle` (unive
 ---
 
 ## Instalasi
-1. Salin file `.dll` (Windows) atau `.bundle` (macOS) ke folder Extra Effects Resolume:
-   - Windows: `Documents\Resolume Arena\Extra Effects` (atau `Resolume Avenue`)
-   - macOS: `~/Documents/Resolume Arena/Extra Effects`
-   - Folder ini juga bisa diatur di **Preferences → Video → Extra Effects**.
-2. Restart Resolume. Plugin muncul di tab **Sources** dengan nama **SC Screen Capture** dan **SC Presentation**.
 
-**Khusus macOS:**
-- File yang diunduh dari internet perlu dilepas dari karantina dulu:
+### Pakai installer (disarankan)
+Unduh installer dari halaman **Releases** repo ini, atau dari **Actions → run terbaru → Artifacts**.
+
+**Windows: `SlideCapture-Setup-Windows.exe`**
+1. Tutup Resolume.
+2. Jalankan installer. Tidak perlu hak admin.
+   Karena installer belum ditandatangani, Windows SmartScreen bisa memblokirnya: klik **More info → Run anyway**.
+3. Plugin dipasang ke `Documents\Resolume Arena\Extra Effects` dan/atau `Documents\Resolume Avenue\Extra Effects`, sesuai Resolume yang terpasang.
+4. Buka Resolume. Plugin ada di tab **Sources**: **SC Screen Capture** dan **SC Presentation**.
+5. Uninstall lewat **Settings → Apps → SlideCapture for Resolume**.
+
+**macOS: `SlideCapture-Installer-macOS.pkg`**
+1. Tutup Resolume.
+2. Pertama kali: **klik kanan → Open**, karena installer belum di-notarize Apple. Kalau masih diblokir, buka **System Settings → Privacy & Security** lalu klik **Open Anyway**.
+3. Plugin dipasang ke `~/Documents/Resolume Arena/Extra Effects` dan/atau `Resolume Avenue`. Tanda karantina dilepas otomatis.
+4. Buka Resolume. Izinkan Resolume di **System Settings → Privacy & Security → Screen Recording**, lalu restart Resolume sekali.
+5. Uninstall: jalankan `/Library/Application Support/SlideCapture/Uninstall SlideCapture.command` (klik dua kali).
+
+### Manual
+Salin file `.dll` (Windows) atau `.bundle` (macOS) ke folder Extra Effects. Folder ini juga bisa diatur di **Preferences → Video → Extra Effects**. Lalu restart Resolume.
+
+**Catatan macOS:**
+- Untuk mode Animated, macOS akan bertanya *"Resolume wants to control Microsoft PowerPoint"*. Klik **OK**. PowerPoint juga bisa meminta izin akses file (*Grant Access*).
+- Instalasi manual dari file unduhan perlu melepas karantina:
   ```bash
   xattr -dr com.apple.quarantine ~/Documents/Resolume\ Arena/Extra\ Effects/SC*.bundle
   ```
-- Saat pertama dipakai, izinkan Resolume di **System Settings → Privacy & Security → Screen Recording**, lalu restart Resolume.
-- Untuk mode Animated, macOS akan bertanya *"Resolume wants to control Microsoft PowerPoint"*. Klik **OK**. PowerPoint juga bisa meminta izin akses file (*Grant Access*).
+
+### Membuat rilis baru
+Push tag versi, misalnya `v1.0.0`. CI membuat GitHub Release berisi kedua installer:
+```bash
+git tag v1.0.0
+```
+```bash
+git push origin v1.0.0
+```
 
 ---
 
@@ -141,10 +164,9 @@ Mode Static:
 Sudah diuji:
 - Kode bersama dan logika kedua plugin di-compile dan dijalankan di host FFGL headless (`tests/ffgl_host_smoke.cpp`, 15 cek: parameter, dropdown dinamis, render, simpan jendela, pesan error, pembatalan konversi, unload tanpa hang). Semua lolos.
 - Konversi PPTX ke PDF lewat LibreOffice, termasuk cache dan nama file berspasi.
-- `PlatformWin.cpp`, `PowerPointWin.cpp`, dan kedua file plugin lolos cek sintaks Windows (MinGW).
+- Build Windows (MSVC) dan macOS (universal) lolos di GitHub Actions, termasuk installer `.exe` dan `.pkg` yang dites pasang dan lepas di CI.
 
-**Belum** diuji karena saya tidak punya mesin Windows/macOS dengan Resolume:
-- `CaptureWin.cpp` dan `PdfWin.cpp` (C++/WinRT) serta semua file `src/mac/*.mm` belum pernah di-compile. Build pertama di GitHub Actions atau di komputer Anda akan menunjukkan kalau ada error. Kirimkan log-nya dan saya perbaiki.
+**Belum** diuji karena belum dijalankan di Resolume sungguhan:
 - Perilaku nyata di Resolume dan PowerPoint, terutama:
   - Apakah jendela slideshow yang dipindah ke luar layar tetap ter-capture di Windows. Kalau hasilnya hitam, matikan **Hide PowerPoint Window**.
   - Perintah AppleScript PowerPoint for Mac (`go to next slide`, `show type`). Istilahnya bisa berbeda antar versi Office.
