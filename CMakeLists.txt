@@ -9,6 +9,9 @@ if(APPLE)
 endif()
 
 project(ResolumeSlideCapture VERSION 1.0 LANGUAGES C CXX)
+
+# Windows: static C++ runtime (matches FFGL's glew32s.lib and needs no VC++ redistributable).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 if(APPLE)
     enable_language(OBJCXX)
 endif()
