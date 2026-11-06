@@ -164,7 +164,7 @@ Mode Static:
 Sudah diuji:
 - Kode bersama dan logika kedua plugin di-compile dan dijalankan di host FFGL headless (`tests/ffgl_host_smoke.cpp`, 15 cek: parameter, dropdown dinamis, render, simpan jendela, pesan error, pembatalan konversi, unload tanpa hang). Semua lolos.
 - Konversi PPTX ke PDF lewat LibreOffice, termasuk cache dan nama file berspasi.
-- Build Windows (MSVC) dan macOS (universal) lolos di GitHub Actions, termasuk installer `.exe` dan `.pkg` yang dites pasang dan lepas di CI.
+- Build Windows (MSVC) dan macOS (universal) lolos di GitHub Actions, termasuk installer yang dites di CI: `.exe` dipasang lalu di-uninstall, `.pkg` dipasang (script uninstall Mac belum dites).
 
 **Belum** diuji karena belum dijalankan di Resolume sungguhan:
 - Perilaku nyata di Resolume dan PowerPoint, terutama:
