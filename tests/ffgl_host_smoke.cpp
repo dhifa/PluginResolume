@@ -7,6 +7,7 @@
 #include <ffgl/FFGL.h>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -78,7 +79,7 @@ static std::string GetText( const char* name )
 	return t ? t : "";
 }
 
-static float GetFloat( const char* name )
+[[maybe_unused]] static float GetFloat( const char* name )
 {
 	FFUInt32 bits = plug( FF_GET_PARAMETER, U( (FFUInt32)ParamIndex( name ) ), inst ).UIntValue;
 	float f;
@@ -179,6 +180,7 @@ int main( int argc, char** argv )
 {
 	if( argc < 3 )
 		return 2;
+	bool hangTest = std::getenv( "SC_TEST_HANG_CAPTURE" ) != nullptr;
 	auto getPlatformDisplay = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress( "eglGetPlatformDisplayEXT" );
 	EGLDisplay dpy          = getPlatformDisplay ? getPlatformDisplay( EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr ) : eglGetDisplay( EGL_DEFAULT_DISPLAY );
 	eglInitialize( dpy, nullptr, nullptr );
@@ -209,6 +211,18 @@ int main( int argc, char** argv )
 	// ---------------- Screen capture
 	{
 		void* lib = Load( argv[ 1 ] );
+		if( hangTest )
+		{
+			// Capture start never returns: Resolume must still be able to add and remove the source.
+			auto t0 = std::chrono::steady_clock::now();
+			Frames( 10 );
+			double ms = std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
+			CHECK( ms < 2000, ( "frames keep rendering while capture hangs (" + std::to_string( (int)ms ) + " ms for 10 frames)" ).c_str() );
+			Unload( lib );
+			std::printf( "\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures );
+			std::fflush( stdout );
+			std::_Exit( failures ? 1 : 0 );// a detached worker is still sleeping; don't wait for it
+		}
 		DumpParams();
 		Frames( 20 );
 		CHECK( CenterHasImage(), "monitor capture draws pixels" );

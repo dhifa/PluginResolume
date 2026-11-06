@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <mutex>
 #include <thread>
+#if defined( _WIN32 )
+extern "C" __declspec( dllimport ) void __stdcall OutputDebugStringA( const char* );
+#endif
 
 namespace plat
 {
@@ -22,7 +25,14 @@ void Log( const std::string& msg )
 	if( logger )
 		logger( msg );
 	else
+	{
+		// Not routed to the host log: the host's log callback may not be safe to call from our worker threads.
+#if defined( _WIN32 )
+		OutputDebugStringA( ( "[SlideCapture] " + msg + "\n" ).c_str() );
+#else
 		std::fprintf( stderr, "[SlideCapture] %s\n", msg.c_str() );
+#endif
+	}
 }
 
 static size_t LastSeparator( const std::string& path )

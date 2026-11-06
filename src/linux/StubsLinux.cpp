@@ -6,6 +6,7 @@
 #include "../common/PowerPoint.h"
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 std::vector< CaptureTarget > EnumerateCaptureTargets( TargetKind kind )
@@ -33,6 +34,8 @@ public:
 	bool start( const CaptureTarget& target, bool, FrameSlot* sink ) override
 	{
 		stop();
+		if( std::getenv( "SC_TEST_HANG_CAPTURE" ) )// simulates an OS capture API that never returns
+			std::this_thread::sleep_for( std::chrono::seconds( 30 ) );
 		running = true;
 		thread  = std::thread( [ this, target, sink ] {
             std::vector< uint8_t > px( size_t( target.width ) * target.height * 4 );

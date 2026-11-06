@@ -46,7 +46,6 @@ ScreenCapturePlugin::ScreenCapturePlugin()
 	SetMinInputs( 0 );
 	SetMaxInputs( 0 );
 
-	plat::SetLogger( []( const std::string& m ) { FFGLLog::LogToHost( ( "SC Screen Capture: " + m ).c_str() ); } );
 
 	monitors = EnumerateCaptureTargets( TargetKind::Monitor );
 	windows  = EnumerateCaptureTargets( TargetKind::Window );
@@ -88,24 +87,28 @@ ScreenCapturePlugin::ScreenCapturePlugin()
 	refreshTargets( false );
 	updateVisibility( false );
 
-	worker.post( [ this ] {
+	worker->post( [ e = engine ] {
 		std::string why;
 		if( !IsScreenCaptureAvailable( &why ) )
-			setStatus( why );
-		capture = CreateScreenCapture();
-		if( capture )
-			capture->setStoppedCallback( [ this ]( const std::string& reason ) { setStatus( reason ); } );
+			e->setStatus( why );
+		e->capture = CreateScreenCapture();
+		if( e->capture )
+			e->capture->setStoppedCallback( [ ep = e.get() ]( const std::string& reason ) { ep->setStatus( reason ); } );
 	} );
 }
 
 ScreenCapturePlugin::~ScreenCapturePlugin()
 {
-	worker.post( [ this ] {
-		if( capture )
-			capture->stop();
-		capture.reset();
+	worker->clearPending();
+	worker->post( [ e = engine ] {
+		if( e->capture )
+			e->capture->stop();
+		e->capture.reset();
 	} );
-	worker.stop();
+	// Never block Resolume for long: if the capture API hangs, the worker is
+	// detached and keeps its own reference to the engine.
+	if( !worker->shutdown( 2000 ) )
+		plat::Log( "capture worker did not stop in time, detached" );
 }
 
 FFResult ScreenCapturePlugin::InitGL( const FFGLViewportStruct* vp )
@@ -122,13 +125,6 @@ FFResult ScreenCapturePlugin::DeInitGL()
 {
 	renderer.release();
 	return FF_SUCCESS;
-}
-
-void ScreenCapturePlugin::setStatus( const std::string& s )
-{
-	std::lock_guard< std::mutex > lock( statusMutex );
-	pendingStatus = s;
-	statusDirty   = true;
 }
 
 int ScreenCapturePlugin::findWindowByKey( const std::string& key ) const
@@ -231,18 +227,18 @@ void ScreenCapturePlugin::applyChanges()
 	if( cursorChanged )
 	{
 		bool c = showCursor;
-		worker.post( [ this, c ] {
-			if( capture )
-				capture->setShowCursor( c );
+		worker->post( [ e = engine, c ] {
+			if( e->capture )
+				e->capture->setShowCursor( c );
 		} );
 		cursorChanged = false;
 	}
 	if( titleBarChanged )
 	{
 		bool h = hideTitleBar;
-		worker.post( [ this, h ] {
-			if( capture )
-				capture->setClientAreaOnly( h );
+		worker->post( [ e = engine, h ] {
+			if( e->capture )
+				e->capture->setClientAreaOnly( h );
 		} );
 		titleBarChanged = false;
 	}
@@ -254,12 +250,12 @@ void ScreenCapturePlugin::applyChanges()
 	const auto& list = window ? windows : monitors;
 	if( list.empty() )
 	{
-		worker.post( [ this ] {
-			if( capture )
-				capture->stop();
+		worker->post( [ e = engine ] {
+			if( e->capture )
+				e->capture->stop();
 		} );
-		slot.clear();
-		setStatus( window ? "No window selected" : "No monitor found" );
+		engine->slot.clear();
+		engine->setStatus( window ? "No window selected" : "No monitor found" );
 		return;
 	}
 
@@ -271,16 +267,16 @@ void ScreenCapturePlugin::applyChanges()
 	}
 	bool cursor          = showCursor;
 	bool clientOnly      = hideTitleBar;
-	worker.clearPending();
-	worker.post( [ this, target, cursor, clientOnly ] {
-		if( !capture )
+	worker->clearPending();
+	worker->post( [ e = engine, target, cursor, clientOnly ] {
+		if( !e->capture )
 			return;
-		capture->stop();
-		capture->setClientAreaOnly( clientOnly );
-		if( capture->start( target, cursor, &slot ) )
-			setStatus( "Capturing: " + target.name );
+		e->capture->stop();
+		e->capture->setClientAreaOnly( clientOnly );
+		if( e->capture->start( target, cursor, &e->slot ) )
+			e->setStatus( "Capturing: " + target.name );
 		else
-			setStatus( "Error: " + capture->lastError() );
+			e->setStatus( "Error: " + e->capture->lastError() );
 	} );
 }
 
@@ -288,14 +284,14 @@ FFResult ScreenCapturePlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 {
 	applyChanges();
 
-	if( statusDirty.exchange( false ) )
+	if( engine->statusDirty.exchange( false ) )
 	{
-		std::lock_guard< std::mutex > lock( statusMutex );
-		statusText = pendingStatus;
+		std::lock_guard< std::mutex > lock( engine->statusMutex );
+		statusText = engine->pendingStatus;
 		RaiseParamEvent( PT_STATUS, FF_EVENT_FLAG_VALUE );
 	}
 
-	renderer.update( slot );
+	renderer.update( engine->slot );
 	Crop c;
 	c.left   = crop[ 0 ] * 0.5f;
 	c.right  = crop[ 1 ] * 0.5f;

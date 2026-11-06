@@ -94,6 +94,8 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSC_BUILD_TESTS=ON && cmake --build build --parallel
       - name: Smoke test
         run: ./build/ffgl_host_smoke build/SCScreenCapture.so build/SCPresentation.so
+      - name: Hang test (a stuck capture must not freeze the host)
+        run: SC_TEST_HANG_CAPTURE=1 ./build/ffgl_host_smoke build/SCScreenCapture.so build/SCPresentation.so
 
   release:
     # Push a tag like v1.0.0 to publish the installers as a GitHub Release.

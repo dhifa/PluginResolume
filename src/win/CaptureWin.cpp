@@ -47,8 +47,22 @@ static std::string ProcessName( DWORD pid )
 	return name;
 }
 
+// Never call GetWindowText/GetWindowTextLength here: for windows of our own
+// process they send WM_GETTEXT to the owning thread, which deadlocks when that
+// thread (Resolume's UI) is waiting for the thread we are called on.
+static std::wstring WindowTitle( HWND hwnd )
+{
+	wchar_t buf[ 512 ] = {};
+	int n              = InternalGetWindowText( hwnd, buf, 512 );// never sends messages
+	return std::wstring( buf, n > 0 ? n : 0 );
+}
+
 static bool IsCapturableWindow( HWND hwnd )
 {
+	DWORD pid = 0;
+	GetWindowThreadProcessId( hwnd, &pid );
+	if( pid == GetCurrentProcessId() )
+		return false;// don't offer Resolume itself (feedback loop), and never touch its windows
 	if( !IsWindowVisible( hwnd ) || GetAncestor( hwnd, GA_ROOT ) != hwnd )
 		return false;
 	LONG ex = GetWindowLongW( hwnd, GWL_EXSTYLE );
@@ -59,12 +73,10 @@ static bool IsCapturableWindow( HWND hwnd )
 	DWORD cloaked = 0;
 	if( SUCCEEDED( DwmGetWindowAttribute( hwnd, DWMWA_CLOAKED, &cloaked, sizeof( cloaked ) ) ) && cloaked )
 		return false;
-	if( GetWindowTextLengthW( hwnd ) == 0 )
+	if( IsHungAppWindow( hwnd ) )
 		return false;
-	DWORD pid = 0;
-	GetWindowThreadProcessId( hwnd, &pid );
-	if( pid == GetCurrentProcessId() )
-		return false;// don't offer Resolume itself (feedback loop)
+	if( WindowTitle( hwnd ).empty() )
+		return false;
 	RECT r;
 	GetWindowRect( hwnd, &r );
 	return ( r.right - r.left ) > 40 && ( r.bottom - r.top ) > 40;
@@ -76,10 +88,7 @@ static BOOL CALLBACK EnumWindowProc( HWND hwnd, LPARAM lp )
 	if( !IsCapturableWindow( hwnd ) )
 		return TRUE;
 
-	int len = GetWindowTextLengthW( hwnd );
-	std::wstring title( len + 1, L'\0' );
-	GetWindowTextW( hwnd, &title[ 0 ], len + 1 );
-	title.resize( wcslen( title.c_str() ) );
+	std::wstring title = WindowTitle( hwnd );
 
 	DWORD pid = 0;
 	GetWindowThreadProcessId( hwnd, &pid );
@@ -314,11 +323,11 @@ private:
 		// Windows 11: remove the yellow capture border.
 		try
 		{
+			// Desktop (unpackaged) apps may simply turn the border off; RequestAccessAsync is
+			// only for packaged apps and can wait forever, so it is not used.
 			static const bool hasBorderApi = ApiInformation::IsPropertyPresent( L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired" );
-			if( !hasBorderApi )
-				return;
-			wgc::GraphicsCaptureAccess::RequestAccessAsync( wgc::GraphicsCaptureAccessKind::Borderless ).get();
-			session.IsBorderRequired( false );
+			if( hasBorderApi )
+				session.IsBorderRequired( false );
 		}
 		catch( ... )
 		{

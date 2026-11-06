@@ -112,7 +112,7 @@ endfunction()
 add_ffgl_plugin(sc_screen_capture "SCScreenCapture" "com.slidecapture.screencapture"
     src/plugins/ScreenCapturePlugin.cpp)
 add_ffgl_plugin(sc_presentation "SCPresentation" "com.slidecapture.presentation"
-    src/plugins/PresentationPlugin.cpp)
+    src/plugins/PresentationPlugin.cpp src/plugins/PresentationEngine.cpp)
 
 # ---------------------------------------------------------------- tests (Linux only)
 option(SC_BUILD_TESTS "Build the headless FFGL smoke test host (Linux)" OFF)

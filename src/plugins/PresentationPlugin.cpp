@@ -26,7 +26,6 @@ enum ParamID : FFUInt32
 };
 
 static const int kMaxSlides     = 999;
-static const size_t kCachePages = 8;
 
 static CFFGLPluginInfo PluginInfo(
 	PluginFactory< PresentationPlugin >,
@@ -45,7 +44,6 @@ PresentationPlugin::PresentationPlugin()
 	SetMinInputs( 0 );
 	SetMaxInputs( 0 );
 
-	plat::SetLogger( []( const std::string& m ) { FFGLLog::LogToHost( ( "SC Presentation: " + m ).c_str() ); } );
 
 	SetOptionParamInfo( PT_SOURCE, "Source", 2, 0.0f );
 	SetParamElementInfo( PT_SOURCE, 0, "File (PPT/PDF)", 0.0f );
@@ -95,25 +93,12 @@ PresentationPlugin::PresentationPlugin()
 	SetParamVisibility( PT_HIDE_WINDOW, false, false );// macOS: the show runs in a normal window
 #endif
 	updateVisibility( false );
-
-	mainWorker.post( [ this ] {
-		capture = CreateScreenCapture();
-		if( capture )
-			capture->setStoppedCallback( [ this ]( const std::string& reason ) {
-				if( activeMode == (int)Active::Animated )
-					setStatus( "Slide show stopped (" + reason + "). Press Reload" );
-			} );
-	} );
 }
 
 PresentationPlugin::~PresentationPlugin()
 {
-	loadGeneration++;
-	mainWorker.clearPending();
-	mainWorker.post( [ this ] { unloadAll(); } );
-	mainWorker.stop();
-	pptWorker.post( [ this ] { show.reset(); } );
-	pptWorker.stop();
+	// Bounded wait: a hanging PowerPoint can never freeze Resolume for long.
+	engine->shutdown();
 }
 
 FFResult PresentationPlugin::InitGL( const FFGLViewportStruct* vp )
@@ -132,14 +117,6 @@ FFResult PresentationPlugin::DeInitGL()
 	return FF_SUCCESS;
 }
 
-void PresentationPlugin::setStatus( const std::string& s )
-{
-	std::lock_guard< std::mutex > lock( statusMutex );
-	pendingStatus = s;
-	statusDirty   = true;
-	plat::Log( s );
-}
-
 void PresentationPlugin::updateVisibility( bool raiseEvents )
 {
 	bool url = std::lround( sourceKind ) == 1;
@@ -148,67 +125,10 @@ void PresentationPlugin::updateVisibility( bool raiseEvents )
 	SetParamVisibility( PT_MODE, !url, raiseEvents );
 }
 
-// ---------------------------------------------------------------- host side
-
 void PresentationPlugin::scheduleLoad( bool forceRefresh )
 {
 	loadPending = true;
 	forceReload = forceReload || forceRefresh;
-}
-
-void PresentationPlugin::navigate( int delta )
-{
-	Active a = (Active)activeMode.load();
-	if( a == Active::Animated )
-	{
-		pptWorker.post( [ this, delta ] {
-			if( !show || !show->isOpen() )
-				return;
-			if( delta > 0 )
-				show->next();
-			else
-				show->previous();
-			currentSlide = show->currentSlide();
-		} );
-	}
-	else if( a == Active::Static )
-	{
-		int count = slideCount.load();
-		if( count <= 0 )
-			return;
-		int p = requestedPage.load() + delta;
-		if( loop )
-			p = ( p % count + count ) % count;
-		else
-			p = std::clamp( p, 0, count - 1 );
-		requestedPage = p;
-		currentSlide  = p + 1;
-		mainWorker.post( [ this ] { renderRequestedPage(); } );
-	}
-}
-
-void PresentationPlugin::gotoSlide( int oneBased )
-{
-	Active a = (Active)activeMode.load();
-	int count = slideCount.load();
-	if( count <= 0 )
-		return;
-	oneBased = std::clamp( oneBased, 1, count );
-	if( a == Active::Animated )
-	{
-		pptWorker.post( [ this, oneBased ] {
-			if( !show || !show->isOpen() )
-				return;
-			show->gotoSlide( oneBased );
-			currentSlide = show->currentSlide();
-		} );
-	}
-	else if( a == Active::Static )
-	{
-		requestedPage = oneBased - 1;
-		currentSlide  = oneBased;
-		mainWorker.post( [ this ] { renderRequestedPage(); } );
-	}
 }
 
 FFResult PresentationPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
@@ -219,23 +139,15 @@ FFResult PresentationPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	{
 		lastViewportW = vw;
 		lastViewportH = vh;
-		if( (Active)activeMode.load() == Active::Static )
-			mainWorker.post( [ this, vw, vh ] {
-				renderW = vw;
-				renderH = vh;
-				pageCache.clear();
-				shownPage = -1;
-				renderRequestedPage();
-			} );
+		engine->viewportChanged( vw, vh );
 	}
 
 	if( loadPending )
 	{
-		LoadRequest req;
-		req.generation   = ++loadGeneration;
+		PresentationEngine::LoadRequest req;
 		req.isUrl        = std::lround( sourceKind ) == 1;
 		req.input        = req.isUrl ? slidesUrl : filePath;
-		req.mode         = (Mode)std::clamp( (int)std::lround( modeValue ), 0, 2 );
+		req.mode         = (PresentationEngine::Mode)std::clamp( (int)std::lround( modeValue ), 0, 2 );
 		req.convert      = (ConverterChoice)std::clamp( (int)std::lround( converterValue ), 0, 2 );
 		req.forceRefresh = forceReload;
 		req.loop         = loop;
@@ -244,23 +156,18 @@ FFResult PresentationPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		req.height       = std::clamp( vh > 0 ? vh : 1080, 64, 4320 );
 		loadPending      = false;
 		forceReload      = false;
-
-		mainWorker.clearPending();
-		mainWorker.post( [ this, req ] { doLoad( req ); } );
+		engine->load( req );
 	}
 
 	// Animated mode: follow slide changes made inside PowerPoint (timings, clicks).
 	auto now = std::chrono::steady_clock::now();
-	if( (Active)activeMode.load() == Active::Animated && now - lastPoll > std::chrono::milliseconds( 750 ) && pptWorker.pending() == 0 )
+	if( now - lastPoll > std::chrono::milliseconds( 750 ) )
 	{
 		lastPoll = now;
-		pptWorker.post( [ this ] {
-			if( show && show->isOpen() )
-				currentSlide = show->currentSlide();
-		} );
+		engine->pollCurrentSlide();
 	}
 
-	int cs = currentSlide.load();
+	int cs = engine->currentSlide();
 	if( cs > 0 && cs != reportedSlide )
 	{
 		reportedSlide = cs;
@@ -268,14 +175,10 @@ FFResult PresentationPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		RaiseParamEvent( PT_SLIDE, FF_EVENT_FLAG_VALUE );
 	}
 
-	if( statusDirty.exchange( false ) )
-	{
-		std::lock_guard< std::mutex > lock( statusMutex );
-		statusText = pendingStatus;
+	if( engine->takeStatus( statusText ) )
 		RaiseParamEvent( PT_STATUS, FF_EVENT_FLAG_VALUE );
-	}
 
-	renderer.update( slot );
+	renderer.update( engine->slot );
 	Crop c;
 	c.left   = crop[ 0 ] * 0.5f;
 	c.right  = crop[ 1 ] * 0.5f;
@@ -283,194 +186,6 @@ FFResult PresentationPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	c.bottom = crop[ 3 ] * 0.5f;
 	renderer.draw( vw, vh, (FitMode)std::lround( fitMode ), c );
 	return FF_SUCCESS;
-}
-
-// ---------------------------------------------------------------- workers
-
-void PresentationPlugin::unloadAll()
-{
-	if( capture )
-		capture->stop();
-	pptWorker.call( [ this ] {
-		if( show )
-			show->close();
-		show.reset();
-		return 0;
-	} );
-	pdf.reset();
-	pageCache.clear();
-	shownPage   = -1;
-	activeMode  = (int)Active::None;
-	slideCount  = 0;
-	currentSlide = 0;
-	slot.clear();
-}
-
-void PresentationPlugin::doLoad( const LoadRequest& req )
-{
-	unloadAll();
-	if( cancelled( req.generation ) )
-		return;
-
-	if( req.input.empty() )
-	{
-		setStatus( req.isUrl ? "Paste a Google Slides share link" : "Choose a PPT/PPTX or PDF file" );
-		return;
-	}
-
-	std::string ext   = plat::Extension( req.input );
-	bool isPowerPoint = !req.isUrl && IsPowerPointExtension( ext );
-	bool hasPowerPoint = plat::IsPowerPointInstalled();
-
-	bool animated = false;
-	if( isPowerPoint )
-	{
-		if( req.mode == Mode::Animated )
-		{
-			if( !hasPowerPoint )
-			{
-				setStatus( "Animated mode needs Microsoft PowerPoint. Install it or set Mode to Static" );
-				return;
-			}
-			animated = true;
-		}
-		else if( req.mode == Mode::Auto )
-		{
-			animated = hasPowerPoint;
-		}
-	}
-
-	if( animated )
-	{
-		setStatus( "Starting PowerPoint slide show..." );
-		PowerPointShowOptions opt;
-		opt.widthPx    = req.width;
-		opt.heightPx   = req.height;
-		opt.hideWindow = req.hideWindow;
-		opt.loop       = req.loop;
-
-		std::string err;
-		CaptureTarget target;
-		bool ok = pptWorker.call( [ & ] {
-			show = CreatePowerPointShow();
-			if( !show || !show->open( req.input, opt, &err ) )
-				return false;
-			slideCount   = show->slideCount();
-			currentSlide = show->currentSlide();
-			return show->captureTarget( target );
-		} );
-		if( cancelled( req.generation ) )
-			return;
-		if( !ok )
-		{
-			setStatus( "PowerPoint: " + ( err.empty() ? std::string( "could not start the slide show" ) : err ) );
-			return;
-		}
-		if( !capture )
-		{
-			setStatus( "Screen capture not available" );
-			return;
-		}
-		capture->setClientAreaOnly( true );
-		if( !capture->start( target, false, &slot ) )
-		{
-			setStatus( "Capture of the slide show failed: " + capture->lastError() );
-			return;
-		}
-		activeMode = (int)Active::Animated;
-		setStatus( "Animated: " + plat::FileName( req.input ) + " (" + std::to_string( slideCount.load() ) + " slides)" );
-		return;
-	}
-
-	// Static: everything becomes a PDF first.
-	PrepareRequest prep;
-	prep.input        = req.input;
-	prep.isUrl        = req.isUrl;
-	prep.converter    = req.convert;
-	prep.forceRefresh = req.forceRefresh;
-	prep.cancelled    = [ this, gen = req.generation ] { return cancelled( gen ); };
-	prep.exportWithPowerPoint = [ this ]( const std::string& in, const std::string& out, std::string* err ) {
-		return pptWorker.call( [ & ] { return PowerPointExportPdf( in, out, err ); } );
-	};
-
-	std::string pdfPath, err;
-	bool ok = PrepareStaticPdf( prep, pdfPath, err, [ this ]( const std::string& s ) { setStatus( s ); } );
-	if( cancelled( req.generation ) )
-		return;
-	if( !ok )
-	{
-		setStatus( "Error: " + err );
-		return;
-	}
-
-	pdf = OpenPdfDocument( pdfPath, &err );
-	if( !pdf || pdf->pageCount() <= 0 )
-	{
-		pdf.reset();
-		setStatus( "Could not open PDF: " + err );
-		return;
-	}
-
-	renderW       = req.width;
-	renderH       = req.height;
-	slideCount    = pdf->pageCount();
-	requestedPage = 0;
-	currentSlide  = 1;
-	activeMode    = (int)Active::Static;
-	renderRequestedPage();
-
-	std::string what = req.isUrl ? std::string( "Google Slides" ) : plat::FileName( req.input );
-	std::string note = isPowerPoint ? " - no animation" : "";
-	setStatus( "Static: " + what + " (" + std::to_string( slideCount.load() ) + " slides" + note + ")" );
-}
-
-bool PresentationPlugin::renderPageCached( int page, int w, int h, Frame*& out )
-{
-	for( auto it = pageCache.begin(); it != pageCache.end(); ++it )
-	{
-		if( it->page == page )
-		{
-			pageCache.splice( pageCache.begin(), pageCache, it );
-			out = &pageCache.front().frame;
-			return true;
-		}
-	}
-	CachedPage entry;
-	entry.page = page;
-	if( !pdf->renderPage( page, w, h, entry.frame ) )
-		return false;
-	pageCache.push_front( std::move( entry ) );
-	while( pageCache.size() > kCachePages )
-		pageCache.pop_back();
-	out = &pageCache.front().frame;
-	return true;
-}
-
-void PresentationPlugin::renderRequestedPage()
-{
-	if( !pdf || (Active)activeMode.load() != Active::Static )
-		return;
-	int page = std::clamp( requestedPage.load(), 0, pdf->pageCount() - 1 );
-	if( page != shownPage )
-	{
-		Frame* frame = nullptr;
-		if( !renderPageCached( page, renderW, renderH, frame ) )
-		{
-			setStatus( "Could not render page " + std::to_string( page + 1 ) );
-			return;
-		}
-		slot.publish( *frame );
-		shownPage = page;
-	}
-	// Pre-render the next page while idle so "Next" is instant.
-	int next = page + 1;
-	if( next < pdf->pageCount() && mainWorker.pending() == 0 )
-	{
-		Frame* ignored = nullptr;
-		renderPageCached( next, renderW, renderH, ignored );
-		// keep the visible page at the front of the cache
-		renderPageCached( page, renderW, renderH, ignored );
-	}
 }
 
 // ---------------------------------------------------------------- params
@@ -498,21 +213,21 @@ FFResult PresentationPlugin::SetFloatParameter( unsigned int index, float value 
 		if( value != converterValue )
 		{
 			converterValue = value;
-			if( (Active)activeMode.load() != Active::Animated )
+			if( !animatedActive() )
 				scheduleLoad( false );
 		}
 		break;
 	case PT_PREV:
 		if( value > 0.5f )
-			navigate( -1 );
+			engine->navigate( -1, loop );
 		break;
 	case PT_NEXT:
 		if( value > 0.5f )
-			navigate( +1 );
+			engine->navigate( +1, loop );
 		break;
 	case PT_FIRST:
 		if( value > 0.5f )
-			gotoSlide( 1 );
+			engine->gotoSlide( 1 );
 		break;
 	case PT_SLIDE:
 	{
@@ -520,8 +235,8 @@ FFResult PresentationPlugin::SetFloatParameter( unsigned int index, float value 
 		if( v != (int)std::lround( slideValue ) )
 		{
 			slideValue = (float)v;
-			if( v != currentSlide.load() )
-				gotoSlide( v );
+			if( v != engine->currentSlide() )
+				engine->gotoSlide( v );
 		}
 		break;
 	}
@@ -533,7 +248,7 @@ FFResult PresentationPlugin::SetFloatParameter( unsigned int index, float value 
 		if( ( value > 0.5f ) != loop )
 		{
 			loop = value > 0.5f;
-			if( (Active)activeMode.load() == Active::Animated )
+			if( animatedActive() )
 				scheduleLoad( false );
 		}
 		break;
@@ -541,7 +256,7 @@ FFResult PresentationPlugin::SetFloatParameter( unsigned int index, float value 
 		if( ( value > 0.5f ) != hideWindow )
 		{
 			hideWindow = value > 0.5f;
-			if( (Active)activeMode.load() == Active::Animated )
+			if( animatedActive() )
 				scheduleLoad( false );
 		}
 		break;

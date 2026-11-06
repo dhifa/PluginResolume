@@ -6,6 +6,25 @@
 #include <atomic>
 #include <mutex>
 
+// Everything the background worker touches. Shared with the worker so a stuck
+// capture call can never free memory that is still in use.
+struct ScreenCaptureEngine
+{
+	FrameSlot slot;
+	std::unique_ptr< ScreenCapture > capture;// worker thread only
+
+	std::mutex statusMutex;
+	std::string pendingStatus;
+	std::atomic< bool > statusDirty{ false };
+
+	void setStatus( const std::string& s )
+	{
+		std::lock_guard< std::mutex > lock( statusMutex );
+		pendingStatus = s;
+		statusDirty   = true;
+	}
+};
+
 class ScreenCapturePlugin : public CFFGLPlugin
 {
 public:
@@ -25,7 +44,6 @@ private:
 	void refreshTargets( bool raiseEvents );
 	void applyChanges();
 	void updateVisibility( bool raiseEvents );
-	void setStatus( const std::string& s );
 	int findWindowByKey( const std::string& key ) const;
 
 	// parameter values
@@ -49,12 +67,7 @@ private:
 	std::vector< CaptureTarget > monitors;
 	std::vector< CaptureTarget > windows;
 
-	std::mutex statusMutex;
-	std::string pendingStatus;
-	std::atomic< bool > statusDirty{ false };
-
-	FrameSlot slot;
 	FrameRenderer renderer;
-	std::unique_ptr< ScreenCapture > capture;// worker thread only
-	Worker worker{ plat::Apartment::MultiThreaded };
+	std::shared_ptr< ScreenCaptureEngine > engine = std::make_shared< ScreenCaptureEngine >();
+	std::shared_ptr< Worker > worker               = Worker::create( plat::Apartment::MultiThreaded );
 };
